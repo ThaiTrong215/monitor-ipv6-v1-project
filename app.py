@@ -18,8 +18,49 @@ ptr_last_checked = {}
 
 def resolve_ptr_and_update(device_id, ip_address):
     try:
-        socket.setdefaulttimeout(2.0)
-        hostname, _, _ = socket.gethostbyaddr(ip_address)
+        hostname = None
+        try:
+            socket.setdefaulttimeout(2.0)
+            hostname, _, _ = socket.gethostbyaddr(ip_address)
+        except Exception:
+            pass
+
+        # Fallback 1: nslookup (often works better for IPv6 PTR if DNS is configured)
+        if not hostname:
+            try:
+                output = subprocess.run(['nslookup', ip_address], capture_output=True, text=True, timeout=2)
+                for line in output.stdout.split('\n'):
+                    if line.strip().startswith('Name:'):
+                        possible_host = line.split('Name:')[1].strip()
+                        if possible_host:
+                            hostname = possible_host
+                        break
+            except Exception:
+                pass
+
+        # Fallback 2: ping -a (works well for local LLMNR/NetBIOS/mDNS names on Windows)
+        if not hostname:
+            try:
+                cmd = ['ping', '-a', '-n', '1', '-w', '500']
+                if ':' in ip_address:
+                    cmd.insert(1, '-6')
+                cmd.append(ip_address)
+                
+                output = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+                for line in output.stdout.split('\n'):
+                    line_lower = line.lower().strip()
+                    if 'ping' in line_lower and '[' in line_lower and ']' in line_lower:
+                        # Extract hostname from "Pinging hostname [IP] ..." or "Đang ping hostname [IP] ..."
+                        parts = line.split('[')[0].split()
+                        # Usually the hostname is the last word before the '['
+                        if len(parts) >= 2:
+                            possible_host = parts[-1].strip()
+                            if possible_host and possible_host.lower() != ip_address.lower() and possible_host.lower() != 'ping':
+                                hostname = possible_host
+                        break
+            except Exception:
+                pass
+
         if hostname:
             conn = get_db_connection()
             current = conn.execute('SELECT name FROM devices WHERE id=?', (device_id,)).fetchone()
@@ -27,8 +68,8 @@ def resolve_ptr_and_update(device_id, ip_address):
                 conn.execute('UPDATE devices SET name=? WHERE id=?', (hostname, device_id))
                 conn.commit()
             conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"PTR resolve error for {ip_address}: {e}")
 app.secret_key = 'super_secret_key_for_flash_messages'
 DB_FILE = 'monitor.db'
 
